@@ -106,3 +106,30 @@ def test_traverse_dependents(db_conn):
 
     dependents_m3 = traverse_dependents(db_conn, m3)
     assert dependents_m3 == []
+
+
+def test_get_latest_context(db_conn):
+    from arc_cli.graph import get_latest_context, update_node_properties, find_nodes
+
+    assert get_latest_context(db_conn) == ""
+
+    n_id = add_node(
+        db_conn,
+        type="memory",
+        label="ingested_context",
+        properties={"content": "Hello Context"},
+    )
+    assert get_latest_context(db_conn) == "Hello Context"
+
+    # Update properties
+    update_node_properties(
+        db_conn,
+        n_id,
+        properties={"content": "Updated Context"},
+    )
+    assert get_latest_context(db_conn) == "Updated Context"
+
+    nodes = find_nodes(db_conn, type="memory", label="ingested_context")
+    assert len(nodes) == 1
+    assert nodes[0]["id"] == n_id
+

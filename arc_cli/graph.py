@@ -274,3 +274,101 @@ def traverse_dependents(conn: sqlite3.Connection, node_id: int) -> List[Dict[str
                     dependents.append(dep_node)
 
     return dependents
+
+
+def update_node_properties(
+    conn: sqlite3.Connection,
+    node_id: int,
+    properties: Dict[str, Any],
+) -> None:
+    """Update the properties JSON blob of an existing node.
+
+    Args:
+        conn: An active sqlite3 Connection object.
+        node_id: ID of the node to update.
+        properties: Key-value pairs to store as JSON.
+    """
+    properties_json = json.dumps(properties)
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE nodes SET properties = ? WHERE id = ?",
+        (properties_json, node_id),
+    )
+    conn.commit()
+
+
+def find_nodes(
+    conn: sqlite3.Connection,
+    type: Optional[str] = None,
+    label: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Search for nodes matching the specified type and/or label.
+
+    Args:
+        conn: An active sqlite3 Connection object.
+        type: Optional node type to filter by.
+        label: Optional node label to filter by.
+
+    Returns:
+        List of matching node dictionaries.
+    """
+    query = "SELECT id, type, label, properties, created_at FROM nodes WHERE 1=1"
+    params: List[Any] = []
+
+    if type is not None:
+        query += " AND type = ?"
+        params.append(type)
+    if label is not None:
+        query += " AND label = ?"
+        params.append(label)
+
+    cursor = conn.cursor()
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+
+    nodes = []
+    for row in rows:
+        raw_props = row[3]
+        try:
+            properties = json.loads(raw_props) if raw_props else {}
+        except (json.JSONDecodeError, TypeError):
+            properties = {}
+        nodes.append(
+            {
+                "id": row[0],
+                "type": row[1],
+                "label": row[2],
+                "properties": properties,
+                "created_at": row[4],
+            }
+        )
+    return nodes
+
+
+def get_latest_context(conn: sqlite3.Connection) -> str:
+    """Fetch the ingested_context memory node and return its content string.
+
+    Args:
+        conn: An active sqlite3 Connection object.
+
+    Returns:
+        The concatenated context content string, or an empty string if not found.
+    """
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT properties FROM nodes
+        WHERE type = 'memory' AND label = 'ingested_context'
+        ORDER BY id DESC LIMIT 1
+        """
+    )
+    row = cursor.fetchone()
+    if not row or not row[0]:
+        return ""
+
+    try:
+        props = json.loads(row[0])
+        return props.get("content", "")
+    except (json.JSONDecodeError, TypeError):
+        return ""
+

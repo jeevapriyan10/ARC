@@ -1,54 +1,33 @@
-import typer
-import pathlib as Path
+from pathlib import Path
 import sqlite3
+import typer
+
+from arc_cli.graph import init_graph_schema
 
 app = typer.Typer()
 
+
+@app.callback()
+def main_callback():
+    """ARC CLI - Knowledge Graph CLI for hackathons and projects."""
+    pass
+
+
 @app.command()
 def init():
-    if not Path.Path(".arc").exists():
-        Path.Path(".arc").mkdir()
-        typer.echo("Project initialized.")
+    arc_dir = Path(".arc")
+    arc_dir.mkdir(parents=True, exist_ok=True)
 
-        db_path = Path.Path(".arc/arc.db")
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute('''CREATE TABLE IF NOT EXISTS milestones (
-            id INTEGER PRIMARY KEY,
-            name TEXT,
-            owner TEXT,
-            deadline TEXT,
-            status TEXT
-        )''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS dependencies (
-            id INTEGER PRIMARY KEY,
-            milestone_id INTEGER,
-            depends_on_id INTEGER
-        )''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS commit_activity (
-            id INTEGER PRIMARY KEY,
-            file TEXT,
-            timestamp TEXT,
-            milestone_id INTEGER
-        )''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS risk_log (
-            id INTEGER PRIMARY KEY,
-            milestone_id INTEGER,
-            signal TEXT,
-            severity TEXT,
-            resolved INTEGER
-        )''')
-        cursor.execute('''CREATE TABLE IF NOT EXISTS nudge_history (
-            id INTEGER PRIMARY KEY,
-            message TEXT,
-            timestamp TEXT,
-            team_response TEXT
-        )''')
-
-        conn.commit()        
+    db_path = arc_dir / "arc.db"
+    conn = sqlite3.connect(db_path)
+    try:
+        init_graph_schema(conn)
+    finally:
         conn.close()
-    else:
-        typer.echo("Project already initialized.")
+
+    typer.echo("Project initialized.")
+
 
 if __name__ == "__main__":
     app()
+

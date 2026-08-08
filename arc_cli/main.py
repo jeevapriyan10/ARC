@@ -13,7 +13,9 @@ from arc_cli.graph import (
     add_edge,
     add_node,
     find_nodes,
+    get_edges_from,
     get_latest_context,
+    get_node,
     init_graph_schema,
     update_node_properties,
 )
@@ -285,8 +287,178 @@ def on_commit():
         conn.close()
 
 
+@app.command()
+def status(
+    silence_hours: float = typer.Option(
+        3.0, "--silence-hours", "-s", help="Commit silence threshold in hours for heartbeat detection"
+    )
+):
+    """Show project status, milestone deadlines, elapsed time, and active risks."""
+    arc_dir = Path(".arc")
+    db_path = arc_dir / "arc.db"
+    if not db_path.exists():
+        typer.echo("Error: Database not found. Please run 'arc init' first.", err=True)
+        raise typer.Exit(code=1)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        init_graph_schema(conn)
+
+        now = datetime.now(timezone.utc)
+        milestones = find_nodes(conn, type="milestone")
+        commits = find_nodes(conn, type="commit")
+
+        if not milestones:
+            typer.echo("No milestones found in graph. Run 'arc plan' first.")
+            return
+
+        at_risk_count = 0
+
+        for m in milestones:
+            m_id = m["id"]
+            m_label = m["label"]
+            m_props = m.get("properties", {})
+            created_at_str = m.get("created_at")
+
+            try:
+                created_dt = datetime.fromisoformat(created_at_str)
+                if created_dt.tzinfo is None:
+                    created_dt = created_dt.replace(tzinfo=timezone.utc)
+                elapsed_seconds = (now - created_dt).total_seconds()
+                elapsed_hours = elapsed_seconds / 3600.0
+            except Exception:
+                elapsed_hours = 0.0
+
+            deadline_hours = float(m_props.get("deadline_hours", 0))
+            current_status = m_props.get("status", "not_started")
+
+            is_overdue = (elapsed_hours > deadline_hours) and (current_status in ["not_started", "in_progress"])
+            m["elapsed_hours"] = elapsed_hours
+            m["is_overdue"] = is_overdue
+
+            if is_overdue:
+                at_risk_count += 1
+                # Edge direction choice: milestone -> risk (relation='causes')
+                # A milestone exceeding its deadline causes a risk node to be generated.
+                existing_causes = get_edges_from(conn, m_id, relation="causes")
+                risk_already_exists = False
+                for edge in existing_causes:
+                    target_node = get_node(conn, edge["target_id"])
+                    if target_node and target_node.get("type") == "risk":
+                        risk_already_exists = True
+                        break
+
+                if not risk_already_exists:
+                    risk_props = {
+                        "signal": "milestone_overdue",
+                        "severity": "high",
+                        "resolved": False,
+                        "milestone_id": m_id,
+                    }
+                    risk_label = f"Overdue: {m_label}"
+                    risk_id = add_node(conn, type="risk", label=risk_label, properties=risk_props)
+                    add_edge(conn, source_id=m_id, target_id=risk_id, relation="causes")
+
+        # Heartbeat check: commits in last N hours
+        last_commit_hours = None
+        if commits:
+            commit_times = []
+            for c in commits:
+                c_time_str = c.get("created_at") or c.get("properties", {}).get("timestamp")
+                if c_time_str:
+                    try:
+                        cdt = datetime.fromisoformat(c_time_str)
+                        if cdt.tzinfo is None:
+                            cdt = cdt.replace(tzinfo=timezone.utc)
+                        commit_times.append(cdt)
+                    except Exception:
+                        pass
+            if commit_times:
+                most_recent_commit = max(commit_times)
+                last_commit_hours = (now - most_recent_commit).total_seconds() / 3600.0
+
+        commit_silence = (last_commit_hours is None or last_commit_hours > silence_hours)
+
+        has_urgent_milestone = False
+        for m in milestones:
+            m_props = m.get("properties", {})
+            st = m_props.get("status", "not_started")
+            dl = float(m_props.get("deadline_hours", 0))
+            el = m.get("elapsed_hours", 0.0)
+            remaining_hours = dl - el
+            if st in ["not_started", "in_progress"] and (remaining_hours <= 2.0 or el > dl):
+                has_urgent_milestone = True
+                break
+
+        if commit_silence and has_urgent_milestone:
+            existing_risks = find_nodes(conn, type="risk")
+            silence_risk_exists = False
+            for r in existing_risks:
+                r_props = r.get("properties", {})
+                if r_props.get("signal") == "commit_silence" and not r_props.get("resolved", False):
+                    silence_risk_exists = True
+                    break
+
+            if not silence_risk_exists:
+                silence_props = {
+                    "signal": "commit_silence",
+                    "severity": "medium",
+                    "resolved": False,
+                    "silence_hours": silence_hours,
+                }
+                add_node(conn, type="risk", label="Commit Silence Warning", properties=silence_props)
+
+        active_risks = [
+            r for r in find_nodes(conn, type="risk")
+            if not r.get("properties", {}).get("resolved", False)
+        ]
+
+        console = Console()
+        m_table = Table(title="ARC Milestone Status & Drift Detection")
+        m_table.add_column("ID", justify="right", style="cyan", no_wrap=True)
+        m_table.add_column("Milestone Name", style="bold white", no_wrap=True)
+        m_table.add_column("Owner", style="magenta")
+        m_table.add_column("Status", style="yellow")
+        m_table.add_column("Elapsed (hrs)", justify="right", style="blue")
+        m_table.add_column("Deadline (hrs)", justify="right", style="green")
+        m_table.add_column("Risk Flag", style="bold red")
+
+        for m in milestones:
+            m_id = str(m["id"])
+            name = m["label"]
+            owner = str(m.get("properties", {}).get("owner", "unassigned"))
+            st = str(m.get("properties", {}).get("status", "not_started"))
+            el = f"{m.get('elapsed_hours', 0.0):.1f}"
+            dl = str(m.get("properties", {}).get("deadline_hours", 0))
+            risk_flag = "[bold red]AT RISK[/bold red]" if m.get("is_overdue") else "[green]OK[/green]"
+            m_table.add_row(m_id, name, owner, st, el, dl, risk_flag)
+
+        console.print(m_table)
+
+        if active_risks:
+            r_table = Table(title="Active Risks & Drift Warnings")
+            r_table.add_column("Risk ID", justify="right", style="cyan")
+            r_table.add_column("Signal", style="bold yellow")
+            r_table.add_column("Severity", style="bold red")
+            r_table.add_column("Description", style="white")
+
+            for r in active_risks:
+                rid = str(r["id"])
+                sig = str(r.get("properties", {}).get("signal", "unknown"))
+                sev = str(r.get("properties", {}).get("severity", "medium")).upper()
+                desc = r["label"]
+                r_table.add_row(rid, sig, sev, desc)
+
+            console.print(r_table)
+        else:
+            console.print("[green]No active risks detected.[/green]")
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     app()
+
 
 
 

@@ -1,3 +1,5 @@
+import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
@@ -185,8 +187,107 @@ def plan(
         conn.close()
 
 
+@app.command()
+def watch():
+    """Install git post-commit hook to automatically track commits in ARC graph."""
+    git_dir = Path(".git")
+    if not git_dir.exists():
+        typer.echo("Error: Not a git repository (.git directory not found).", err=True)
+        raise typer.Exit(code=1)
+
+    hooks_dir = git_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    hook_file = hooks_dir / "post-commit"
+    if hook_file.exists():
+        typer.echo("Warning: .git/hooks/post-commit already exists. Skipping installation.", err=True)
+        return
+
+    hook_content = "#!/bin/sh\npython -m arc_cli.main on-commit\n"
+    hook_file.write_text(hook_content, encoding="utf-8")
+    try:
+        hook_file.chmod(0o755)
+    except Exception:
+        pass
+
+    typer.echo("Git post-commit hook installed successfully.")
+
+
+@app.command(hidden=True)
+def on_commit():
+    """Internal hook executed by git post-commit to record commits in ARC graph."""
+    arc_dir = Path(".arc")
+    db_path = arc_dir / "arc.db"
+    if not db_path.exists():
+        return
+
+    try:
+        commit_hash = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True
+        ).strip()
+    except Exception:
+        return
+
+    try:
+        raw_files = subprocess.check_output(
+            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+            text=True,
+        ).strip()
+        changed_files = [f.strip() for f in raw_files.splitlines() if f.strip()]
+    except Exception:
+        changed_files = []
+
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        init_graph_schema(conn)
+
+        commit_label = f"Commit {commit_hash[:7]}"
+        commit_props = {
+            "hash": commit_hash,
+            "timestamp": timestamp,
+            "files": changed_files,
+        }
+        commit_node_id = add_node(conn, type="commit", label=commit_label, properties=commit_props)
+
+        milestones = find_nodes(conn, type="milestone")
+        linked_milestones = []
+
+        for m in milestones:
+            m_id = m["id"]
+            m_label = m["label"]
+            m_props = m.get("properties", {})
+
+            # Naive heuristic: check if milestone label or significant keywords are substring matched in changed file paths
+            keywords = [w.lower() for w in re.split(r"\W+", m_label) if len(w) > 2]
+            
+            matched = False
+            for fpath in changed_files:
+                fpath_lower = fpath.lower()
+                if m_label.lower() in fpath_lower or any(kw in fpath_lower for kw in keywords):
+                    matched = True
+                    break
+
+            if matched:
+                add_edge(conn, source_id=commit_node_id, target_id=m_id, relation="touches")
+                if m_props.get("status") == "not_started":
+                    m_props["status"] = "in_progress"
+                    update_node_properties(conn, m_id, m_props)
+                linked_milestones.append(m_label)
+
+        if linked_milestones:
+            m_str = ", ".join(linked_milestones)
+            typer.echo(f"Commit {commit_hash[:7]} linked to milestone(s): {m_str}")
+        else:
+            typer.echo(f"Commit {commit_hash[:7]} recorded (no milestone match).")
+    finally:
+        conn.close()
+
+
 if __name__ == "__main__":
     app()
+
 
 
 

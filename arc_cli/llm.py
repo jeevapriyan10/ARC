@@ -145,3 +145,89 @@ def parse_plan_json(response_text: str) -> List[Dict[str, Any]]:
         raise ValueError("'milestones' field must be a list.")
 
     return milestones
+
+
+def draft_nudge_message(
+    reasoning: str,
+    milestone_name: str,
+    model_name: Optional[str] = None,
+) -> str:
+    """Draft a short, specific nudge message (1-3 sentences) using local LLM.
+
+    Args:
+        reasoning: Combined reasoning from intervention gate checks.
+        milestone_name: Name of the target milestone.
+        model_name: Optional model override.
+
+    Returns:
+        Specific nudge message text (1-3 sentences).
+    """
+    load_dotenv()
+
+    system_prompt = (
+        "You are ARC, an automated AI project coordinator. "
+        "Draft a short, urgent, highly specific Slack nudge message (1 to 3 sentences max) to alert the development team to a risk. "
+        "Do NOT use generic boilerplate. Explicitly reference the milestone name and dependency impact provided in the reasoning."
+    )
+    user_prompt = (
+        f"Milestone: {milestone_name}\n"
+        f"Decision Reasoning: {reasoning}\n\n"
+        "Draft the specific 1-3 sentence Slack nudge:"
+    )
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    # 1. Local Ollama endpoint
+    ollama_url = os.getenv("ARC_OLLAMA_URL")
+    if ollama_url or _check_ollama_available():
+        endpoint = ollama_url.rstrip("/") if ollama_url else "http://localhost:11434"
+        try:
+            req_data = json.dumps({
+                "model": os.getenv("ARC_OLLAMA_MODEL", "qwen2.5:0.5b"),
+                "messages": messages,
+                "stream": False,
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                f"{endpoint}/api/chat",
+                data=req_data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if "message" in data and "content" in data["message"]:
+                    res_text = data["message"]["content"].strip()
+                    if res_text:
+                        return res_text
+        except Exception:
+            pass
+
+    # 2. Local Hugging Face transformers pipeline if explicitly configured
+    if model_name or os.getenv("ARC_LLM_MODEL") or os.getenv("ARC_USE_TRANSFORMERS") == "1":
+        try:
+            from transformers import pipeline
+
+            if not model_name:
+                model_name = os.getenv("ARC_LLM_MODEL", "Qwen/Qwen2.5-0.5B-Instruct")
+
+            pipe = pipeline("text-generation", model=model_name, max_new_tokens=150, return_full_text=False)
+            results = pipe(messages)
+            if results and len(results) > 0 and "generated_text" in results[0]:
+                gen = results[0]["generated_text"]
+                if isinstance(gen, list) and len(gen) > 0 and isinstance(gen[-1], dict):
+                    text = gen[-1].get("content", "").strip()
+                    if text:
+                        return text
+                elif isinstance(gen, str) and gen.strip():
+                    return gen.strip()
+        except Exception:
+            pass
+
+    # Fallback to specific structured message referencing milestone & reasoning
+    return (
+        f"[ARC Risk Alert]: Milestone '{milestone_name}' requires immediate attention. "
+        f"{reasoning} Please check status and push updates to unblock dependent milestones."
+    )

@@ -5,11 +5,17 @@ Evaluates unresolved risk nodes against three gate criteria:
 1. Materiality (impact / dependents / passed deadline)
 2. Timing (nudge anti-spam window)
 3. Specificity (identifiable milestone and context)
+
+When all checks pass (FIRE NUDGE), drafts a specific nudge message via LLM
+and delivers it to Slack via incoming webhook.
 """
 
 from datetime import datetime, timezone
+import os
 import sqlite3
 from typing import Any, Dict, Optional, Tuple
+from dotenv import load_dotenv
+import requests
 
 from arc_cli.graph import (
     add_edge,
@@ -20,6 +26,7 @@ from arc_cli.graph import (
     get_node,
     traverse_dependents,
 )
+from arc_cli.llm import draft_nudge_message
 
 
 def _get_milestone_for_risk(
@@ -196,10 +203,45 @@ def specificity(conn: sqlite3.Connection, risk_node_id: int) -> Tuple[bool, str]
     return True, f"Specific milestone identified: '{m_label}'{recent_info}."
 
 
+def post_slack_nudge(webhook_url: Optional[str], message: str) -> bool:
+    """Post a nudge message to Slack incoming webhook URL using requests.
+
+    Gracefully handles network errors, bad URLs, missing env vars, and HTTP errors.
+
+    Args:
+        webhook_url: Slack incoming webhook URL.
+        message: The nudge message text to post.
+
+    Returns:
+        True if HTTP POST succeeded with status 200, False otherwise.
+    """
+    if not webhook_url or not webhook_url.strip():
+        print("[Slack Nudge Warning] SLACK_WEBHOOK_URL is not configured.")
+        return False
+
+    try:
+        payload = {"text": message}
+        resp = requests.post(webhook_url, json=payload, timeout=5)
+        if resp.status_code == 200 and resp.text.strip().lower() == "ok":
+            print("[Slack Nudge OK] Nudge delivered successfully to Slack!")
+            return True
+        else:
+            print(f"[Slack Nudge Error] Failed to post to Slack (HTTP {resp.status_code}): {resp.text}")
+            return False
+    except Exception as exc:
+        print(f"[Slack Nudge Network Error] Could not connect to Slack webhook: {exc}")
+        return False
+
+
 def run_gate(conn: sqlite3.Connection, risk_node_id: int, hours: float = 4.0) -> Dict[str, Any]:
     """Runs all three gate checks, records a decision node in the graph,
-    and returns a summary dictionary.
+    and if final_verdict is FIRE NUDGE, drafts & posts a Slack nudge message.
+
+    On successful Slack delivery, records a 'nudge' node linked to the decision node.
+    Does NOT auto-resolve the risk node.
     """
+    load_dotenv()
+
     mat_pass, mat_reason = materiality(conn, risk_node_id)
     tim_pass, tim_reason = timing(conn, risk_node_id, hours=hours)
     spec_pass, spec_reason = specificity(conn, risk_node_id)
@@ -238,6 +280,48 @@ def run_gate(conn: sqlite3.Connection, risk_node_id: int, hours: float = 4.0) ->
         relation="decided_by",
     )
 
+    nudge_sent = False
+    nudge_node_id = None
+    nudge_message = ""
+
+    if final_verdict:
+        m_node, m_id = _get_milestone_for_risk(conn, risk_node_id)
+        m_name = m_node.get("label", f"Milestone #{m_id}") if m_node else "Milestone"
+
+        try:
+            nudge_message = draft_nudge_message(
+                reasoning=combined_reasoning,
+                milestone_name=m_name,
+            )
+        except Exception:
+            nudge_message = (
+                f"🚨 *ARC Risk Alert*: Milestone *{m_name}* requires immediate attention. "
+                f"{combined_reasoning}"
+            )
+
+        webhook_url = os.getenv("SLACK_WEBHOOK_URL")
+        nudge_sent = post_slack_nudge(webhook_url, nudge_message)
+
+        if nudge_sent:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            nudge_props = {
+                "message": nudge_message,
+                "timestamp": now_iso,
+                "milestone_id": m_id,
+            }
+            nudge_node_id = add_node(
+                conn,
+                type="nudge",
+                label=f"Nudge: {m_name}",
+                properties=nudge_props,
+            )
+            add_edge(
+                conn,
+                source_id=decision_node_id,
+                target_id=nudge_node_id,
+                relation="links_to",
+            )
+
     return {
         "id": decision_node_id,
         "risk_id": risk_node_id,
@@ -250,4 +334,7 @@ def run_gate(conn: sqlite3.Connection, risk_node_id: int, hours: float = 4.0) ->
         "final_verdict": final_verdict,
         "should_fire": final_verdict,
         "combined_reasoning": combined_reasoning,
+        "nudge_sent": nudge_sent,
+        "nudge_node_id": nudge_node_id,
+        "nudge_message": nudge_message,
     }

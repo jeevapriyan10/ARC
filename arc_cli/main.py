@@ -19,6 +19,7 @@ from arc_cli.graph import (
     init_graph_schema,
     update_node_properties,
 )
+from arc_cli.gate import run_gate
 from arc_cli.llm import generate_plan_response, parse_plan_json
 
 app = typer.Typer()
@@ -450,6 +451,36 @@ def status(
                 r_table.add_row(rid, sig, sev, desc)
 
             console.print(r_table)
+
+            g_table = Table(title="ARC Intervention Gate Decisions")
+            g_table.add_column("Risk ID", justify="right", style="cyan")
+            g_table.add_column("Verdict", style="bold")
+            g_table.add_column("Materiality", style="green")
+            g_table.add_column("Timing", style="yellow")
+            g_table.add_column("Specificity", style="blue")
+            g_table.add_column("Reasoning", style="white")
+
+            for r in active_risks:
+                decision = run_gate(conn, r["id"])
+                verdict_styled = (
+                    "[bold green]FIRE NUDGE[/bold green]"
+                    if decision["final_verdict"]
+                    else "[bold red]STAY SILENT[/bold red]"
+                )
+                mat_str = "[green]PASS[/green]" if decision["materiality_result"] else "[red]FAIL[/red]"
+                tim_str = "[green]PASS[/green]" if decision["timing_result"] else "[red]FAIL[/red]"
+                spec_str = "[green]PASS[/green]" if decision["specificity_result"] else "[red]FAIL[/red]"
+
+                g_table.add_row(
+                    str(r["id"]),
+                    verdict_styled,
+                    mat_str,
+                    tim_str,
+                    spec_str,
+                    decision["combined_reasoning"],
+                )
+
+            console.print(g_table)
         else:
             console.print("[green]No active risks detected.[/green]")
     finally:

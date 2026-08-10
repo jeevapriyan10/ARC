@@ -20,7 +20,7 @@ from arc_cli.graph import (
     update_node_properties,
 )
 from arc_cli.gate import run_gate
-from arc_cli.llm import generate_plan_response, parse_plan_json
+from arc_cli.llm import generate_plan_response, generate_report_response, parse_plan_json
 
 app = typer.Typer()
 
@@ -483,6 +483,118 @@ def status(
             console.print(g_table)
         else:
             console.print("[green]No active risks detected.[/green]")
+    finally:
+        conn.close()
+
+
+@app.command()
+def report(
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m", help="Override local LLM model name/path"
+    )
+):
+    """Generate pitch readiness summary, blocker digest, and pitch outline."""
+    arc_dir = Path(".arc")
+    arc_dir.mkdir(parents=True, exist_ok=True)
+    db_path = arc_dir / "arc.db"
+
+    if not db_path.exists():
+        typer.echo("Error: Database not found. Please run 'arc init' first.", err=True)
+        raise typer.Exit(code=1)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        init_graph_schema(conn)
+
+        milestones = find_nodes(conn, type="milestone")
+        commits = find_nodes(conn, type="commit")
+        decision_nodes = find_nodes(conn, type="decision")
+        nudge_nodes = find_nodes(conn, type="nudge")
+        unresolved_risks = [
+            r for r in find_nodes(conn, type="risk")
+            if not r.get("properties", {}).get("resolved", False)
+        ]
+        ingested_context = get_latest_context(conn)
+
+        # Build context summary string
+        context_lines = ["=== ARC PROJECT GRAPH REPORT CONTEXT ==="]
+        if ingested_context:
+            context_lines.append(f"\n--- INGESTED PROJECT CONTEXT ---\n{ingested_context}")
+
+        context_lines.append("\n--- MILESTONES ---")
+        if milestones:
+            for m in milestones:
+                props = m.get("properties", {})
+                st = props.get("status", "not_started")
+                owner = props.get("owner", "unassigned")
+                deadline = props.get("deadline_hours", 0)
+                context_lines.append(f"- ID #{m['id']} '{m['label']}' | Status: {st} | Owner: {owner} | Deadline: {deadline}h")
+        else:
+            context_lines.append("- None")
+
+        context_lines.append("\n--- UNRESOLVED RISKS ---")
+        if unresolved_risks:
+            for r in unresolved_risks:
+                props = r.get("properties", {})
+                sig = props.get("signal", "unknown")
+                sev = props.get("severity", "medium")
+                context_lines.append(f"- Risk #{r['id']} '{r['label']}' | Signal: {sig} | Severity: {sev}")
+        else:
+            context_lines.append("- None")
+
+        context_lines.append("\n--- INTERVENTION GATE DECISIONS ---")
+        if decision_nodes:
+            for d in decision_nodes:
+                props = d.get("properties", {})
+                verdict = "FIRE NUDGE" if props.get("final_verdict") else "STAY SILENT"
+                reason = props.get("combined_reasoning", "")
+                context_lines.append(f"- Decision #{d['id']} for Risk #{props.get('risk_id')} | Verdict: {verdict} | Reasoning: {reason}")
+        else:
+            context_lines.append("- None")
+
+        context_lines.append("\n--- RECENT NUDGES ---")
+        if nudge_nodes:
+            for n in nudge_nodes:
+                props = n.get("properties", {})
+                msg = props.get("message", "")
+                ts = props.get("timestamp", "")
+                context_lines.append(f"- Nudge #{n['id']} at {ts} | Message: {msg}")
+        else:
+            context_lines.append("- None")
+
+        context_lines.append("\n--- RECENT COMMITS ---")
+        if commits:
+            for c in commits[-5:]:
+                props = c.get("properties", {})
+                files = ", ".join(props.get("files", []))
+                context_lines.append(f"- {c['label']} at {props.get('timestamp', '')} | Files: {files}")
+        else:
+            context_lines.append("- None")
+
+        report_context = "\n".join(context_lines)
+
+        # Store as 'memory' node (label='latest_report_context') in graph
+        timestamp = datetime.now(timezone.utc).isoformat()
+        report_mem_props = {
+            "content": report_context,
+            "generated_at": timestamp,
+        }
+        existing_mems = find_nodes(conn, type="memory", label="latest_report_context")
+        if existing_mems:
+            update_node_properties(conn, existing_mems[0]["id"], report_mem_props)
+        else:
+            add_node(conn, type="memory", label="latest_report_context", properties=report_mem_props)
+
+        typer.echo("Generating project report and pitch readiness summary using local LLM...")
+        report_markdown = generate_report_response(report_context, model_name=model)
+
+        report_file = arc_dir / "report.md"
+        report_file.write_text(report_markdown, encoding="utf-8")
+
+        from rich.markdown import Markdown
+        console = Console()
+        console.print("\n", Markdown(report_markdown))
+        typer.echo(f"\nReport saved to: {report_file}")
     finally:
         conn.close()
 

@@ -16,6 +16,7 @@ import sqlite3
 from typing import Any, Dict, Optional, Tuple
 from dotenv import load_dotenv
 import requests
+import typer
 
 from arc_cli.graph import (
     add_edge,
@@ -217,20 +218,20 @@ def post_slack_nudge(webhook_url: Optional[str], message: str) -> bool:
         True if HTTP POST succeeded with status 200, False otherwise.
     """
     if not webhook_url or not webhook_url.strip():
-        print("[Slack Nudge Warning] SLACK_WEBHOOK_URL is not configured.")
+        typer.echo("[Slack Nudge Warning] SLACK_WEBHOOK_URL is not configured.", err=True)
         return False
 
     try:
         payload = {"text": message}
         resp = requests.post(webhook_url, json=payload, timeout=5)
         if resp.status_code == 200 and resp.text.strip().lower() == "ok":
-            print("[Slack Nudge OK] Nudge delivered successfully to Slack!")
+            typer.echo("[Slack Nudge OK] Nudge delivered successfully to Slack!")
             return True
         else:
-            print(f"[Slack Nudge Error] Failed to post to Slack (HTTP {resp.status_code}): {resp.text}")
+            typer.echo(f"[Slack Nudge Error] Failed to post to Slack (HTTP {resp.status_code}): {resp.text}", err=True)
             return False
     except Exception as exc:
-        print(f"[Slack Nudge Network Error] Could not connect to Slack webhook: {exc}")
+        typer.echo(f"[Slack Nudge Network Error] Could not connect to Slack webhook: {exc}", err=True)
         return False
 
 

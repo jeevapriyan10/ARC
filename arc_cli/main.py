@@ -125,12 +125,16 @@ def plan(
     arc_dir = Path(".arc")
     db_path = arc_dir / "arc.db"
 
+    if not db_path.exists():
+        typer.echo("Error: Database not found. Please run 'arc init' first.", err=True)
+        raise typer.Exit(code=1)
+
     conn = sqlite3.connect(db_path)
     try:
         init_graph_schema(conn)
         context = get_latest_context(conn)
         if not context or not context.strip():
-            typer.echo("Error: No ingested context found. Please run 'arc ingest' first.", err=True)
+            typer.echo("Error: No ingested context found. Please run 'arc ingest <files...>' first.", err=True)
             raise typer.Exit(code=1)
 
         typer.echo("Generating project plan from ingested context using local LLM...")

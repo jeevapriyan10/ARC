@@ -1,0 +1,39 @@
+[
+  {
+    "type": "setup",
+    "hour": 0,
+    "milestones": [
+      {
+        "name": "Auth Login API",
+        "owner": "Alice",
+        "deadline_hours": 8,
+        "status": "not_started"
+      },
+      {
+        "name": "User Dashboard UI",
+        "owner": "Bob",
+        "deadline_hours": 16,
+        "status": "not_started",
+        "depends_on": ["Auth Login API"]
+      }
+    ]
+  },
+  {
+    "type": "commit",
+    "hour": 6,
+    "files": ["auth/login.py"]
+  },
+  {
+    "type": "advance_time",
+    "hour": 10
+  },
+  {
+    "type": "commit",
+    "hour": 11,
+    "files": ["auth/login.py"]
+  },
+  {
+    "type": "advance_time",
+    "hour": 20
+  }
+]

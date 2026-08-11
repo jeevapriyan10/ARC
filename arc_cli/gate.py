@@ -21,6 +21,7 @@ from arc_cli.graph import (
     add_edge,
     add_node,
     find_nodes,
+    get_current_time,
     get_edges_from,
     get_edges_to,
     get_node,
@@ -83,7 +84,7 @@ def materiality(conn: sqlite3.Connection, risk_node_id: int) -> Tuple[bool, str]
     num_dependents = len(dependents)
 
     # Check deadline
-    now = datetime.now(timezone.utc)
+    now = get_current_time(conn)
     deadline_hours = float(m_props.get("deadline_hours", 0))
     created_at_str = m_node.get("created_at")
 
@@ -128,7 +129,7 @@ def timing(conn: sqlite3.Connection, risk_node_id: int, hours: float = 4.0) -> T
     Has a nudge already fired for this exact risk in the last N hours (default 4)?
     If so, timing fails (avoid spamming). Otherwise timing passes.
     """
-    now = datetime.now(timezone.utc)
+    now = get_current_time(conn)
     m_node, m_id = _get_milestone_for_risk(conn, risk_node_id)
 
     decision_nodes = find_nodes(conn, type="decision")
@@ -303,7 +304,7 @@ def run_gate(conn: sqlite3.Connection, risk_node_id: int, hours: float = 4.0) ->
         nudge_sent = post_slack_nudge(webhook_url, nudge_message)
 
         if nudge_sent:
-            now_iso = datetime.now(timezone.utc).isoformat()
+            now_iso = get_current_time(conn).isoformat()
             nudge_props = {
                 "message": nudge_message,
                 "timestamp": now_iso,

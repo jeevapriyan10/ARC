@@ -6,9 +6,69 @@ retrieval, and traversal.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import sqlite3
 from typing import Any, Dict, List, Optional
+
+BASE_DEMO_TIME = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+
+
+def get_project_clock(conn: sqlite3.Connection) -> Optional[float]:
+    """Retrieve the current fake project clock hour if set in graph memory, else None."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT properties FROM nodes
+        WHERE type = 'memory' AND label = 'project_clock'
+        ORDER BY id DESC LIMIT 1
+        """
+    )
+    row = cursor.fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        props = json.loads(row[0])
+        if "current_hour" in props:
+            return float(props["current_hour"])
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+    return None
+
+
+def set_project_clock(conn: sqlite3.Connection, current_hour: float) -> None:
+    """Set or update the fake project clock hour in memory node."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, properties FROM nodes
+        WHERE type = 'memory' AND label = 'project_clock'
+        ORDER BY id DESC LIMIT 1
+        """
+    )
+    row = cursor.fetchone()
+    if row:
+        node_id = row[0]
+        try:
+            props = json.loads(row[1]) if row[1] else {}
+        except Exception:
+            props = {}
+        props["current_hour"] = current_hour
+        update_node_properties(conn, node_id, props)
+    else:
+        props = {"current_hour": current_hour, "base_time": BASE_DEMO_TIME.isoformat()}
+        add_node(conn, type="memory", label="project_clock", properties=props)
+
+
+def get_current_time(conn: Optional[sqlite3.Connection] = None) -> datetime:
+    """Returns fake project clock time if demo clock active in database, else real UTC time."""
+    if conn is not None:
+        try:
+            hour = get_project_clock(conn)
+            if hour is not None:
+                return BASE_DEMO_TIME + timedelta(hours=hour)
+        except Exception:
+            pass
+    return datetime.now(timezone.utc)
 
 
 def init_graph_schema(conn: sqlite3.Connection) -> None:
@@ -53,6 +113,7 @@ def add_node(
     type: str,
     label: str,
     properties: Optional[Dict[str, Any]] = None,
+    created_at: Optional[str] = None,
 ) -> int:
     """Add a node to the knowledge graph.
 
@@ -61,6 +122,7 @@ def add_node(
         type: The type of node (e.g. milestone, file, commit, decision, risk, nudge, memory).
         label: Human-readable label for the node.
         properties: Type-specific key-value pairs stored as JSON.
+        created_at: Optional explicit ISO timestamp string. Defaults to get_current_time(conn).
 
     Returns:
         The integer ID of the created node.
@@ -69,7 +131,8 @@ def add_node(
         properties = {}
 
     properties_json = json.dumps(properties)
-    created_at = datetime.now(timezone.utc).isoformat()
+    if created_at is None:
+        created_at = get_current_time(conn).isoformat()
 
     cursor = conn.cursor()
     cursor.execute(
@@ -88,6 +151,7 @@ def add_edge(
     source_id: int,
     target_id: int,
     relation: str,
+    created_at: Optional[str] = None,
 ) -> int:
     """Add a directed edge between two nodes in the knowledge graph.
 
@@ -96,11 +160,13 @@ def add_edge(
         source_id: ID of the source node.
         target_id: ID of the target node.
         relation: Relation type (e.g. depends_on, touches, resolves, causes, blocks, decided_by, links_to).
+        created_at: Optional explicit ISO timestamp string. Defaults to get_current_time(conn).
 
     Returns:
         The integer ID of the created edge.
     """
-    created_at = datetime.now(timezone.utc).isoformat()
+    if created_at is None:
+        created_at = get_current_time(conn).isoformat()
 
     cursor = conn.cursor()
     cursor.execute(

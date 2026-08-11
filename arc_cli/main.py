@@ -1,22 +1,35 @@
+import json
 import re
 import subprocess
+import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 import sqlite3
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 import typer
+
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 from arc_cli.graph import (
     add_edge,
     add_node,
     find_nodes,
+    get_current_time,
     get_edges_from,
     get_latest_context,
     get_node,
+    get_project_clock,
     init_graph_schema,
+    set_project_clock,
     update_node_properties,
 )
 from arc_cli.gate import run_gate
@@ -79,7 +92,7 @@ def ingest(
             file_sections.append(f"--- FILE: {file_path} ---\n{content}")
 
         concatenated_context = "\n\n".join(file_sections)
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = get_current_time(conn).isoformat()
         properties = {
             "content": concatenated_context,
             "source_files": source_filenames,
@@ -216,34 +229,45 @@ def watch():
     typer.echo("Git post-commit hook installed successfully.")
 
 
-@app.command(hidden=True)
-def on_commit():
-    """Internal hook executed by git post-commit to record commits in ARC graph."""
-    arc_dir = Path(".arc")
-    db_path = arc_dir / "arc.db"
-    if not db_path.exists():
-        return
+def on_commit_impl(
+    commit_hash: Optional[str] = None,
+    changed_files: Optional[List[str]] = None,
+    conn: Optional[sqlite3.Connection] = None,
+    demo_mode: bool = False,
+):
+    """Internal implementation to record commits in ARC graph."""
+    close_conn_on_exit = False
+    if conn is None:
+        arc_dir = Path(".arc")
+        db_path = arc_dir / "arc.db"
+        if not db_path.exists():
+            return
+        conn = sqlite3.connect(db_path)
+        close_conn_on_exit = True
 
     try:
-        commit_hash = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True
-        ).strip()
-    except Exception:
-        return
+        if not commit_hash:
+            try:
+                commit_hash = subprocess.check_output(
+                    ["git", "rev-parse", "HEAD"], text=True
+                ).strip()
+            except Exception:
+                if demo_mode:
+                    commit_hash = "demo_commit"
+                else:
+                    return
 
-    try:
-        raw_files = subprocess.check_output(
-            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
-            text=True,
-        ).strip()
-        changed_files = [f.strip() for f in raw_files.splitlines() if f.strip()]
-    except Exception:
-        changed_files = []
+        if changed_files is None:
+            try:
+                raw_files = subprocess.check_output(
+                    ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
+                    text=True,
+                ).strip()
+                changed_files = [f.strip() for f in raw_files.splitlines() if f.strip()]
+            except Exception:
+                changed_files = []
 
-    timestamp = datetime.now(timezone.utc).isoformat()
-
-    conn = sqlite3.connect(db_path)
-    try:
+        timestamp = get_current_time(conn).isoformat()
         init_graph_schema(conn)
 
         commit_label = f"Commit {commit_hash[:7]}"
@@ -262,9 +286,8 @@ def on_commit():
             m_label = m["label"]
             m_props = m.get("properties", {})
 
-            # Naive heuristic: check if milestone label or significant keywords are substring matched in changed file paths
             keywords = [w.lower() for w in re.split(r"\W+", m_label) if len(w) > 2]
-            
+
             matched = False
             for fpath in changed_files:
                 fpath_lower = fpath.lower()
@@ -285,27 +308,36 @@ def on_commit():
         else:
             typer.echo(f"Commit {commit_hash[:7]} recorded (no milestone match).")
     finally:
-        conn.close()
+        if close_conn_on_exit and conn:
+            conn.close()
 
 
-@app.command()
-def status(
-    silence_hours: float = typer.Option(
-        3.0, "--silence-hours", "-s", help="Commit silence threshold in hours for heartbeat detection"
-    )
+@app.command(hidden=True)
+def on_commit():
+    """Internal hook executed by git post-commit to record commits in ARC graph."""
+    on_commit_impl()
+
+
+def status_impl(
+    silence_hours: float = 4.0,
+    conn: Optional[sqlite3.Connection] = None,
+    demo_mode: bool = False,
 ):
-    """Show project status, milestone deadlines, elapsed time, and active risks."""
-    arc_dir = Path(".arc")
-    db_path = arc_dir / "arc.db"
-    if not db_path.exists():
-        typer.echo("Error: Database not found. Please run 'arc init' first.", err=True)
-        raise typer.Exit(code=1)
+    """Show project status, milestone deadlines, elapsed time, and active risks implementation."""
+    close_conn_on_exit = False
+    if conn is None:
+        arc_dir = Path(".arc")
+        db_path = arc_dir / "arc.db"
+        if not db_path.exists():
+            typer.echo("Error: Database not found. Please run 'arc init' first.", err=True)
+            raise typer.Exit(code=1)
+        conn = sqlite3.connect(db_path)
+        close_conn_on_exit = True
 
-    conn = sqlite3.connect(db_path)
     try:
         init_graph_schema(conn)
 
-        now = datetime.now(timezone.utc)
+        now = get_current_time(conn)
         milestones = find_nodes(conn, type="milestone")
         commits = find_nodes(conn, type="commit")
 
@@ -326,7 +358,7 @@ def status(
                 if created_dt.tzinfo is None:
                     created_dt = created_dt.replace(tzinfo=timezone.utc)
                 elapsed_seconds = (now - created_dt).total_seconds()
-                elapsed_hours = elapsed_seconds / 3600.0
+                elapsed_hours = max(0.0, elapsed_seconds / 3600.0)
             except Exception:
                 elapsed_hours = 0.0
 
@@ -339,8 +371,6 @@ def status(
 
             if is_overdue:
                 at_risk_count += 1
-                # Edge direction choice: milestone -> risk (relation='causes')
-                # A milestone exceeding its deadline causes a risk node to be generated.
                 existing_causes = get_edges_from(conn, m_id, relation="causes")
                 risk_already_exists = False
                 for edge in existing_causes:
@@ -376,11 +406,13 @@ def status(
                         pass
             if commit_times:
                 most_recent_commit = max(commit_times)
-                last_commit_hours = (now - most_recent_commit).total_seconds() / 3600.0
+                last_commit_hours = max(0.0, (now - most_recent_commit).total_seconds() / 3600.0)
 
-        commit_silence = (last_commit_hours is None or last_commit_hours > silence_hours)
+        commit_silence = (last_commit_hours is None or last_commit_hours >= silence_hours)
 
         has_urgent_milestone = False
+        urgent_m_id = None
+        urgent_m_label = ""
         for m in milestones:
             m_props = m.get("properties", {})
             st = m_props.get("status", "not_started")
@@ -389,6 +421,8 @@ def status(
             remaining_hours = dl - el
             if st in ["not_started", "in_progress"] and (remaining_hours <= 2.0 or el > dl):
                 has_urgent_milestone = True
+                urgent_m_id = m["id"]
+                urgent_m_label = m["label"]
                 break
 
         if commit_silence and has_urgent_milestone:
@@ -407,7 +441,14 @@ def status(
                     "resolved": False,
                     "silence_hours": silence_hours,
                 }
-                add_node(conn, type="risk", label="Commit Silence Warning", properties=silence_props)
+                if urgent_m_id is not None:
+                    silence_props["milestone_id"] = urgent_m_id
+                silence_label = (
+                    f"Commit Silence Warning ({urgent_m_label})"
+                    if urgent_m_label
+                    else "Commit Silence Warning"
+                )
+                add_node(conn, type="risk", label=silence_label, properties=silence_props)
 
         active_risks = [
             r for r in find_nodes(conn, type="risk")
@@ -484,7 +525,131 @@ def status(
         else:
             console.print("[green]No active risks detected.[/green]")
     finally:
+        if close_conn_on_exit and conn:
+            conn.close()
+
+
+@app.command()
+def status(
+    silence_hours: float = typer.Option(
+        4.0, "--silence-hours", "-s", help="Commit silence threshold in hours for heartbeat detection"
+    ),
+):
+    """Show project status, milestone deadlines, elapsed time, and active risks."""
+    status_impl(silence_hours=silence_hours)
+
+
+@app.command()
+def demo(
+    script_path: Path = typer.Argument(
+        ..., help="Path to JSON demo script file (e.g. demo_scenario.json)"
+    ),
+    delay: float = typer.Option(
+        1.5, "--delay", "-d", help="Pause duration in seconds between demo steps for live audience pacing"
+    ),
+    db_file: Optional[Path] = typer.Option(
+        None, "--db", help="Optional path to database file for demo replay"
+    ),
+):
+    """Play through a scripted demo timeline showing ARC's judgment in real-time."""
+    if not script_path.exists():
+        typer.echo(f"Error: Demo script file '{script_path}' does not exist.", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        events = json.loads(script_path.read_text(encoding="utf-8"))
+    except Exception as e:
+        typer.echo(f"Error reading JSON script '{script_path}': {e}", err=True)
+        raise typer.Exit(code=1)
+
+    if not isinstance(events, list):
+        typer.echo("Error: Demo script must contain a JSON array of events.", err=True)
+        raise typer.Exit(code=1)
+
+    arc_dir = Path(".arc")
+    arc_dir.mkdir(parents=True, exist_ok=True)
+    target_db = db_file if db_file else arc_dir / "demo_replay.db"
+    if target_db.exists():
+        try:
+            target_db.unlink()
+        except Exception:
+            pass
+
+    conn = sqlite3.connect(target_db)
+    init_graph_schema(conn)
+
+    console = Console()
+    console.print(Panel.fit("[bold cyan]ARC Scripted Demo Timeline Replay[/bold cyan]"))
+
+    start_wall_time = time.time()
+
+    try:
+        for idx, event in enumerate(events, start=1):
+            etype = str(event.get("type", "advance_time")).lower()
+            hour = float(event.get("hour", 0))
+
+            set_project_clock(conn, hour)
+
+            console.print(
+                f"\n[bold yellow]=== Step {idx}/{len(events)}: Project Hour {hour:.1f} ({etype.upper()}) ===[/bold yellow]"
+            )
+
+            if etype in ["setup", "init"]:
+                milestones_data = event.get("milestones", [])
+                name_to_id = {}
+                for m in milestones_data:
+                    m_name = m.get("name", "Unnamed Milestone")
+                    m_owner = m.get("owner", "unassigned")
+                    m_dl = float(m.get("deadline_hours", 0))
+                    m_status = m.get("status", "not_started")
+                    m_id = add_node(
+                        conn,
+                        type="milestone",
+                        label=m_name,
+                        properties={"owner": m_owner, "deadline_hours": m_dl, "status": m_status},
+                    )
+                    name_to_id[m_name] = m_id
+                    console.print(f"  [cyan]+[/cyan] Milestone added: [bold white]{m_name}[/bold white] ({m_owner}, deadline: {m_dl}h)")
+
+                for m in milestones_data:
+                    m_name = m.get("name")
+                    deps = m.get("depends_on", [])
+                    if m_name in name_to_id:
+                        curr_id = name_to_id[m_name]
+                        for dep_name in deps:
+                            if dep_name in name_to_id:
+                                add_edge(conn, source_id=curr_id, target_id=name_to_id[dep_name], relation="depends_on")
+                                console.print(f"  [yellow]->[/yellow] Dependency edge: {m_name} --depends_on--> {dep_name}")
+
+                status_impl(conn=conn, demo_mode=True)
+
+            elif etype == "commit":
+                files = event.get("files", [])
+                commit_hash = f"c_{int(hour):02d}a9f"
+                console.print(f"  [green][COMMIT][/green] Simulating Commit at Hour {hour:.1f}: Hash=[cyan]{commit_hash}[/cyan] Files={files}")
+                on_commit_impl(commit_hash=commit_hash, changed_files=files, conn=conn, demo_mode=True)
+                status_impl(conn=conn, demo_mode=True)
+
+            elif etype in ["advance_time", "status"]:
+                console.print(f"  [blue][TIME][/blue] Clock advanced to Hour {hour:.1f}. Evaluating status & intervention gate...")
+                status_impl(conn=conn, demo_mode=True)
+
+            else:
+                console.print(f"  [yellow][EVENT][/yellow] Event: {etype} at Hour {hour:.1f}")
+                status_impl(conn=conn, demo_mode=True)
+
+            if delay > 0 and idx < len(events):
+                time.sleep(delay)
+
+        total_elapsed = time.time() - start_wall_time
+        console.print(f"\n[bold green][SUCCESS] Demo Replay Finished in {total_elapsed:.2f}s (well under 2 minutes limit)![/bold green]\n")
+    finally:
         conn.close()
+        if target_db.exists() and not db_file:
+            try:
+                target_db.unlink()
+            except Exception:
+                pass
 
 
 @app.command()

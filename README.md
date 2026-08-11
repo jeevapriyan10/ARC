@@ -1,28 +1,71 @@
 # ARC CLI — Autonomous Reasoning & Intervention Engine
 
-ARC is an offline-first Knowledge Graph CLI companion built for fast-paced software development and hackathons. It continuously monitors project progress, links git commit activity to plan milestones, detects drift, and applies a strict 3-rule intervention gate before alerting team channels.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python Version](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/downloads/)
+[![CLI Framework](https://img.shields.io/badge/CLI-Typer-009485.svg)](https://typer.tiangolo.com/)
+[![Formatting](https://img.shields.io/badge/UI-Rich-magenta.svg)](https://rich.readthedocs.io/)
+
+**ARC** (Autonomous Reasoning CLI) is a lightweight, offline-first Knowledge Graph engine designed to eliminate project drift, track milestone progress, and automate developer interventions in fast-paced software projects and hackathons.
 
 ---
 
 ## Key Features
 
-- **Knowledge Graph Core**: Uses SQLite to model milestones, code commits, drift risks, gate decisions, and context memory.
-- **Automated Git Integration**: `arc watch` installs a git post-commit hook that automatically links modified files to project milestones.
-- **Drift & Inactivity Heartbeat**: Detects overdue deadlines and commit silence on critical path tasks.
-- **3-Rule Intervention Gate**: Prevents alert fatigue by filtering risks through **Materiality**, **Timing**, and **Specificity** checks before firing nudges.
-- **Local LLM Integration**: Generates structured milestone plans, specific Slack nudge messages, and pitch-readiness summaries without requiring cloud AI dependencies (supports local Ollama or Hugging Face transformers with offline fallback).
-- **Time-Aware Demo Mode**: Scripted timeline replay engine using a virtual project clock for instant 2-minute live demonstrations.
+- **Offline Knowledge Graph**: Built on SQLite (`.arc/arc.db`), modeling milestones, git commits, risk signals, gate decisions, and context memory.
+- **Git Post-Commit Integration**: `arc watch` automatically links modified files to target milestone tasks upon git commits.
+- **Drift & Inactivity Heartbeat**: Detects overdue deadlines and commit silence on critical-path milestones.
+- **3-Rule Intervention Gate**: Prevents notification spam by filtering risk signals through **Materiality**, **Timing**, and **Specificity** checks.
+- **Local AI Synthesis**: Integrates with local Ollama or Hugging Face models (with offline fallback) for generating milestone plans, drafting tailored Slack nudges, and outputting pitch-readiness reports (`.arc/report.md`).
+- **Time-Aware Replay Mode**: Replays scripted project timelines using a virtual project clock for live presentations (`arc demo`).
 
 ---
 
-## Quickstart & Installation
+## Architecture Overview
+
+```mermaid
+graph TD
+    Ingest["Context Ingestion (arc ingest)"] --> MemoryNode["Memory Node"]
+    MemoryNode --> Plan["Local LLM Planner (arc plan)"]
+    Plan --> Milestones["Milestone Nodes & Dependencies"]
+    
+    GitHook["Git Post-Commit Hook (arc watch)"] --> CommitNode["Commit Node"]
+    CommitNode -- touches --> Milestones
+    
+    Milestones -- causes --> Risks["Drift / Inactivity Risk Nodes"]
+    Risks --> Gate Engine
+    
+    subgraph Gate Engine ["3-Rule Intervention Gate"]
+        Mat["1. Materiality Check"]
+        Tim["2. Timing Window (4h)"]
+        Spec["3. Specificity Check"]
+    end
+    
+    Gate Engine -- FIRE NUDGE --> Slack["Slack Alert / Nudge Log"]
+    Gate Engine -- STAY SILENT --> Silent["Suppress Notification"]
+    
+    Milestones --> Report["Pitch Readiness Report (arc report)"]
+```
+
+### Knowledge Graph Schema
+
+- **Nodes**: `milestone`, `commit`, `risk`, `decision`, `nudge`, `memory`
+- **Edges**:
+  - `depends_on`: Connects dependent milestones (`Milestone B --depends_on--> Milestone A`)
+  - `touches`: Connects commits to milestones (`Commit C --touches--> Milestone A`)
+  - `causes`: Connects overdue milestones to risks (`Milestone A --causes--> Risk R`)
+  - `links_to`: Connects gate decisions to dispatched nudges (`Decision D --links_to--> Nudge N`)
+
+---
+
+## Quickstart
 
 ### Prerequisites
 - Python 3.9+
 - Git
 
 ### Installation
-Clone the repository and install in editable mode:
+
+Clone the repository and install locally in editable mode:
 
 ```bash
 git clone https://github.com/jeevapriyan10/ARC.git
@@ -31,62 +74,86 @@ pip install -e .
 ```
 
 Verify installation:
+
 ```bash
 arc --help
 ```
 
 ---
 
+## Typical Developer Workflow
+
+### 1. Initialize & Ingest Project Context
+```bash
+arc init
+arc ingest problem_statement.md README.md
+```
+
+### 2. Generate Milestone Plan
+```bash
+arc plan
+```
+
+### 3. Enable Git Hook Monitoring
+```bash
+arc watch
+```
+
+### 4. Check Project Status & Drift Signals
+```bash
+arc status
+```
+
+### 5. Generate Pitch Readiness & Executive Summary
+```bash
+arc report
+```
+Generates `.arc/report.md` containing a Pitch-Readiness Summary, Blocker Digest, and Pitch Outline.
+
+---
+
 ## Command Reference
 
-| Command | Usage | Description |
+| Command | Arguments / Options | Description |
 |---|---|---|
-| `init` | `arc init` | Initializes the `.arc/arc.db` SQLite Knowledge Graph schema. |
-| `ingest` | `arc ingest <files...>` | Ingests problem statements or README docs into graph `memory` nodes. |
-| `plan` | `arc plan [--model M]` | Parses ingested context using local LLM to generate structured milestones and dependency edges. |
-| `watch` | `arc watch` | Installs `.git/hooks/post-commit` to automatically track commits in ARC graph. |
-| `status` | `arc status [--silence-hours 4.0]` | Displays milestone progress, drift warnings, active risks, and intervention gate verdicts. |
-| `report` | `arc report [--model M]` | Synthesizes project state into `.arc/report.md` (Pitch Readiness, Blocker Digest, Pitch Outline). |
-| `demo` | `arc demo <script.json> [--delay S]` | Replays a simulated project timeline with virtual project clock for live presentations. |
+| `arc init` | None | Initializes `.arc/arc.db` Knowledge Graph database schema. |
+| `arc ingest` | `<files...>` | Reads doc files into graph memory for milestone planning. |
+| `arc plan` | `[--model -m]` | Uses local LLM to generate milestone nodes & dependency edges. |
+| `arc watch` | None | Installs `.git/hooks/post-commit` for auto commit-tracking. |
+| `arc status` | `[--silence-hours -s 4.0]` | Evaluates deadlines, commit silence, and gate decisions. |
+| `arc report` | `[--model -m]` | Synthesizes project status into `.arc/report.md`. |
+| `arc demo` | `<script.json> [--delay -d 1.5]` | Replays a simulated timeline with a virtual project clock. |
 
 ---
 
-## Knowledge Graph Architecture
+## Demo Replay Mode
 
-ARC models software projects as a directed property graph stored locally in SQLite (`.arc/arc.db`).
-
-### Node Types
-- `milestone`: Target project goals with owners, deadlines, and completion statuses (`not_started`, `in_progress`, `completed`).
-- `commit`: Recorded git commit hashes, timestamps, and touched file lists.
-- `risk`: Flagged drift signals (`milestone_overdue`, `commit_silence`).
-- `decision`: Evaluation records from the intervention gate (`FIRE NUDGE` vs `STAY SILENT`).
-- `nudge`: Sent alert logs with timestamps and delivered text.
-- `memory`: Ingested document content and generated report contexts.
-
-### Edge Relations
-- `depends_on`: Connects dependent milestones (`Milestone B --depends_on--> Milestone A`).
-- `touches`: Connects commits to impacted milestones (`Commit C --touches--> Milestone A`).
-- `causes`: Connects overdue milestones to generated risk nodes (`Milestone A --causes--> Risk R`).
-- `links_to`: Connects gate decisions to dispatched nudge logs (`Decision D --links_to--> Nudge N`).
-
----
-
-## Intervention Gate Logic
-
-To eliminate spam and deliver actionable nudges, every risk signal must pass all three gate criteria:
-
-1. **Materiality**: Verifies whether the risk affects a milestone with downstream dependents or an overdue deadline.
-2. **Timing**: Enforces a 4-hour anti-spam window per risk signal to prevent repeated notifications.
-3. **Specificity**: Ensures the alert identifies a concrete milestone and code context rather than generic warnings.
-
----
-
-## Scripted Demo Timeline
-
-To showcase ARC's judgment loop in a 2-minute live demo:
+To showcase ARC's judgment loop in a live presentation:
 
 ```bash
 arc demo demo_scenario.json --delay 0.5
 ```
 
-This runs a simulated timeline replay using a virtual project clock without modifying your primary database.
+This runs through a simulated project timeline without touching your real project database.
+
+---
+
+## Running Tests
+
+Run the unit test suite using `pytest`:
+
+```bash
+python -m pytest -v
+```
+
+---
+
+## Contributing
+
+Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) for details on submitting pull requests and reporting issues.
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
